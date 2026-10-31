@@ -87,6 +87,8 @@ struct Patch {
 Patch g_patches[MaxPatches] = {};
 int g_patchCount = 0;
 
+std::atomic<uint32_t> g_calls[7] = {};  // cursor, physical cursor, key state, async key state, foreground, active, focus
+
 auto Active() noexcept -> bool {
 	return g_block != nullptr && g_block[IdxActive] != 0;
 }
@@ -131,36 +133,48 @@ auto VirtualCursor(LPPOINT point) noexcept -> bool {
 }
 
 auto WINAPI HookCursor(LPPOINT point) -> BOOL {
+	g_calls[0].fetch_add(1, std::memory_order_relaxed);
 	return VirtualCursor(point) ? TRUE : g_realCursor(point);
 }
 
 auto WINAPI HookPhysicalCursor(LPPOINT point) -> BOOL {
+	g_calls[1].fetch_add(1, std::memory_order_relaxed);
 	return VirtualCursor(point) ? TRUE : g_realPhysicalCursor(point);
 }
 
 auto WINAPI HookKeyState(int vk) -> SHORT {
+	g_calls[2].fetch_add(1, std::memory_order_relaxed);
 	SHORT state = 0;
 	return Active() && VirtualKey(vk, &state) ? state : g_realKeyState(vk);
 }
 
 auto WINAPI HookAsyncKeyState(int vk) -> SHORT {
+	g_calls[3].fetch_add(1, std::memory_order_relaxed);
 	SHORT state = 0;
 	return Active() && VirtualKey(vk, &state) ? state : g_realAsyncKeyState(vk);
 }
 
 auto WINAPI HookForeground() -> HWND {
+	g_calls[4].fetch_add(1, std::memory_order_relaxed);
 	const HWND window = g_window.load();
 	return window != nullptr ? window : g_realForeground();
 }
 
 auto WINAPI HookActive() -> HWND {
+	g_calls[5].fetch_add(1, std::memory_order_relaxed);
 	const HWND window = g_window.load();
 	return window != nullptr ? window : g_realActive();
 }
 
 auto WINAPI HookFocus() -> HWND {
+	g_calls[6].fetch_add(1, std::memory_order_relaxed);
 	const HWND window = g_window.load();
 	return window != nullptr ? window : g_realFocus();
+}
+
+// Windows would report the real mouse leaving the game window, which ends hover for the virtual cursor.
+auto WINAPI HookTrackMouse(LPTRACKMOUSEEVENT) -> BOOL {
+	return TRUE;
 }
 
 // --- Import tables -------------------------------------------------------------------------------------------------
@@ -240,6 +254,7 @@ void SwapImports(uintptr_t exeBase) noexcept {
 		{"GetForegroundWindow", reinterpret_cast<void*>(g_realForeground), reinterpret_cast<void*>(&HookForeground)},
 		{"GetActiveWindow", reinterpret_cast<void*>(g_realActive), reinterpret_cast<void*>(&HookActive)},
 		{"GetFocus", reinterpret_cast<void*>(g_realFocus), reinterpret_cast<void*>(&HookFocus)},
+		{"TrackMouseEvent", reinterpret_cast<void*>(GetProcAddress(user32, "TrackMouseEvent")), reinterpret_cast<void*>(&HookTrackMouse)},
 	};
 	SwapInModule(exeBase, swaps, static_cast<int>(sizeof(swaps) / sizeof(swaps[0])));
 	const HMODULE core = GetModuleHandleW(L"D2RCore.dll");
@@ -398,6 +413,8 @@ auto StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* comman
 	              Active() ? 1 : 0, g_commands, g_mutedSessions);
 	command->plugin->WriteConsoleMessage(line);
 	plog::Info("%s", line);
+	plog::Info("calls: cursor %u, physical %u, key %u, async key %u, foreground %u, active %u, focus %u", g_calls[0].load(), g_calls[1].load(), g_calls[2].load(),
+	           g_calls[3].load(), g_calls[4].load(), g_calls[5].load(), g_calls[6].load());
 	return D2RL::ConsoleCommandResult::Handled;
 }
 
