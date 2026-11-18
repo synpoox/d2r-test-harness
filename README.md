@@ -44,8 +44,15 @@ py -3 tools/pad.py --slot 3 status | off                       # `off` removes t
 `--plugins DIR` replaces `--slot`. Console command `testharness` prints the pad state and how often the game called each
 XInput function; the plugin log lists input-related modules as they load. Tests: `py -3 -m unittest tests.test_pad`.
 
-Limits: a mouse move or click makes the game fall back to the mouse UI (send pad input after it, and `release` the
-mouse); held keys answer only the key-state queries, not `WM_KEYDOWN`, so they suit modifiers; rumble is dropped; only
+Last device wins: while the harness cursor is active (after any `game_ctl click`), D2R's controller menus ignore the pad,
+because the pinned virtual cursor keeps hover focus. So when the pad file changes after the last cursor or button change in
+the harness block, `GetCursorPos` answers with the real cursor again; the next click takes the virtual cursor back. No
+`release` is needed between a click and pad input. `XInputGetKeystroke` stays empty: D2R's menus do not read it.
+
+Open the inventory with START (BACK is the automap, Y a skill slot). Empty grid cells show no highlight, so read the footer
+hints and tooltips to see where focus is.
+
+Limits: a mouse move or click makes the game fall back to the mouse UI (send pad input after it); held keys answer only the key-state queries, not `WM_KEYDOWN`, so they suit modifiers; rumble is dropped; only
 pad 0 exists; `GetAsyncKeyState`'s low bit (pressed since the last call) is never set, and a press shorter than ~20 ms
 can be missed. The caller must hold the slot lock, as for every other harness command (`pad.py` does not check it).
 

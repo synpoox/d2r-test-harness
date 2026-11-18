@@ -26,6 +26,7 @@ char g_text[512] = "";
 State g_state;
 std::atomic<bool> g_connected{false};
 std::atomic<DWORD> g_packet{0};
+std::atomic<ULONGLONG> g_changed{0};
 std::atomic<uint32_t> g_calls[5] = {};  // GetState, GetStateEx, GetCapabilities, SetState, GetKeystroke
 
 void* g_real[Modules][5] = {};  // per module: GetState, GetStateEx, GetCapabilities, SetState, GetKeystroke
@@ -196,6 +197,7 @@ void Poll() noexcept {
 	const bool was = g_connected.load();
 	g_state = s;  // a stale read for a frame is fine for a test tool
 	g_packet.fetch_add(1);
+	g_changed.store(GetTickCount64());
 	g_connected.store(true);
 	if (!was) {
 		plog::Info("pad: virtual pad on (state file seen)");
@@ -204,6 +206,10 @@ void Poll() noexcept {
 
 auto Connected() noexcept -> bool {
 	return g_connected.load();
+}
+
+auto ChangedTick() noexcept -> ULONGLONG {
+	return g_changed.load();
 }
 
 auto Exports(int module, size_t* count) noexcept -> Export* {
