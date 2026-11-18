@@ -19,15 +19,18 @@
 
 #include "crash_guard.h"
 #include "log.h"
+#include "pad.h"
 
 #include <windows.h>
 
 #include <audiopolicy.h>
+#include <psapi.h>
 #include <mmdeviceapi.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <type_traits>
@@ -49,8 +52,9 @@ constexpr int32_t ModShift = 1, ModCtrl = 2, ModAlt = 4;
 
 constexpr const wchar_t* WordFile = L"d2r-testharness.txt";
 constexpr const wchar_t* ConsoleFile = L"d2r-testharness-console.txt";
-constexpr int MaxPatches = 64;
+constexpr int MaxPatches = 256;
 constexpr DWORD PollMs = 20;
+constexpr int RescanPolls = 100;  // about every 2 s
 constexpr int MutePolls = 50;  // sessions appear and return while the game runs: look again about once a second
 
 constexpr D2RL::PluginInfo Info {
@@ -79,6 +83,8 @@ wchar_t g_consolePath[MAX_PATH] = L"";
 int g_patchedEntries = 0;
 int g_commands = 0;
 int g_mutedSessions = 0;
+uintptr_t g_exeBase = 0;
+wchar_t g_folder[MAX_PATH] = L"";
 
 struct Patch {
 	void** slot;
@@ -145,12 +151,18 @@ auto WINAPI HookPhysicalCursor(LPPOINT point) -> BOOL {
 auto WINAPI HookKeyState(int vk) -> SHORT {
 	g_calls[2].fetch_add(1, std::memory_order_relaxed);
 	SHORT state = 0;
+	if (pad::KeyHeld(vk, &state)) {
+		return state;
+	}
 	return Active() && VirtualKey(vk, &state) ? state : g_realKeyState(vk);
 }
 
 auto WINAPI HookAsyncKeyState(int vk) -> SHORT {
 	g_calls[3].fetch_add(1, std::memory_order_relaxed);
 	SHORT state = 0;
+	if (pad::KeyHeld(vk, &state)) {
+		return state;
+	}
 	return Active() && VirtualKey(vk, &state) ? state : g_realAsyncKeyState(vk);
 }
 
@@ -233,7 +245,57 @@ void SwapInModule(uintptr_t base, Swap* swaps, int count) noexcept {
 	}
 }
 
-void SwapImports(uintptr_t exeBase) noexcept {
+// Swaps the entries in the game image, D2RCore.dll and the other DLLs of the plugins folder (a plugin then reads the
+// same virtual input as the game). shortcut: only plugins loaded before this one; a later one keeps the real input.
+void SwapEverywhere(uintptr_t exeBase, const wchar_t* folder, Swap* swaps, int count) noexcept {
+	SwapInModule(exeBase, swaps, count);
+	const HMODULE core = GetModuleHandleW(L"D2RCore.dll");
+	if (core != nullptr) {
+		SwapInModule(reinterpret_cast<uintptr_t>(core), swaps, count);
+	}
+	HMODULE modules[512];
+	DWORD bytes = 0;
+	HMODULE self = nullptr;
+	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&SwapInModule), &self);
+	if (K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &bytes)) {
+		const size_t folderLength = std::wcslen(folder);
+		for (DWORD i = 0; i < bytes / sizeof(HMODULE) && i < 512; ++i) {
+			wchar_t path[MAX_PATH];
+			if (modules[i] != self && GetModuleFileNameW(modules[i], path, MAX_PATH) != 0 && _wcsnicmp(path, folder, folderLength) == 0 &&
+			    path[folderLength] == L'\\') {
+				SwapInModule(reinterpret_cast<uintptr_t>(modules[i]), swaps, count);
+			}
+		}
+	}
+}
+
+// XInput: every export of every XInput DLL the process has loaded, so the pad works whichever one the game picked.
+// Resolved by export name, never by address. Returns the new number of entries in swaps.
+auto AddPadSwaps(Swap* swaps, int at, int capacity) noexcept -> int {
+	static const wchar_t* const modules[] = {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinputuap.dll", L"xinput1_2.dll", L"xinput1_1.dll"};
+	size_t exportCount = 0;
+	pad::Export* exports = pad::Exports(&exportCount);
+	for (const wchar_t* name : modules) {
+		const HMODULE module = GetModuleHandleW(name);
+		if (module == nullptr) {
+			continue;
+		}
+		for (size_t i = 0; i < exportCount; ++i) {
+			const char* exportName = exports[i].name;
+			void* const real = reinterpret_cast<void*>(exportName[0] == '#' ? GetProcAddress(module, MAKEINTRESOURCEA(std::atoi(exportName + 1))) : GetProcAddress(module, exportName));
+			if (real != nullptr && at < capacity) {
+				if (*exports[i].real == nullptr) {
+					*exports[i].real = real;
+				}
+				swaps[at++] = Swap {exportName, real, exports[i].hook};
+			}
+		}
+	}
+	return at;
+}
+
+// folder: the plugins folder.
+void SwapImports(uintptr_t exeBase, const wchar_t* folder) noexcept {
 	const HMODULE user32 = GetModuleHandleW(L"user32.dll");
 	if (user32 == nullptr) {
 		return;
@@ -246,7 +308,7 @@ void SwapImports(uintptr_t exeBase) noexcept {
 	load(&g_realForeground, "GetForegroundWindow");
 	load(&g_realActive, "GetActiveWindow");
 	load(&g_realFocus, "GetFocus");
-	Swap swaps[] = {
+	Swap swaps[64] = {
 		{"GetCursorPos", reinterpret_cast<void*>(g_realCursor), reinterpret_cast<void*>(&HookCursor)},
 		{"GetPhysicalCursorPos", reinterpret_cast<void*>(g_realPhysicalCursor), reinterpret_cast<void*>(&HookPhysicalCursor)},
 		{"GetKeyState", reinterpret_cast<void*>(g_realKeyState), reinterpret_cast<void*>(&HookKeyState)},
@@ -256,11 +318,8 @@ void SwapImports(uintptr_t exeBase) noexcept {
 		{"GetFocus", reinterpret_cast<void*>(g_realFocus), reinterpret_cast<void*>(&HookFocus)},
 		{"TrackMouseEvent", reinterpret_cast<void*>(GetProcAddress(user32, "TrackMouseEvent")), reinterpret_cast<void*>(&HookTrackMouse)},
 	};
-	SwapInModule(exeBase, swaps, static_cast<int>(sizeof(swaps) / sizeof(swaps[0])));
-	const HMODULE core = GetModuleHandleW(L"D2RCore.dll");
-	if (core != nullptr) {
-		SwapInModule(reinterpret_cast<uintptr_t>(core), swaps, static_cast<int>(sizeof(swaps) / sizeof(swaps[0])));
-	}
+	const int count = AddPadSwaps(swaps, 8, 64);
+	SwapEverywhere(exeBase, folder, swaps, count);
 	g_patchedEntries = g_patchCount;
 }
 
@@ -367,11 +426,56 @@ auto CALLBACK FindWindowProc(HWND window, LPARAM result) -> BOOL {
 	return TRUE;
 }
 
+// Logs each module that looks like an input path (XInput, HID, Windows.Gaming.Input, GameInput, Steam) the first time it
+// is seen, so the log shows which one the game really uses.
+void WatchModules() noexcept {
+	static HMODULE seen[256];
+	static int seenCount = 0;
+	HMODULE modules[1024];
+	DWORD bytes = 0;
+	if (!K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &bytes)) {
+		return;
+	}
+	for (DWORD i = 0; i < bytes / sizeof(HMODULE) && i < 1024; ++i) {
+		wchar_t path[MAX_PATH];
+		if (GetModuleFileNameW(modules[i], path, MAX_PATH) == 0) {
+			continue;
+		}
+		wchar_t lower[MAX_PATH];
+		wcscpy_s(lower, path);
+		_wcslwr_s(lower);
+		const wchar_t* file = std::wcsrchr(lower, L'\\');
+		file = file != nullptr ? file + 1 : lower;
+		const wchar_t* keys[] = {L"input", L"hid", L"gaming", L"steam", L"joy", L"gamepad", L"usb", L"bluetooth"};
+		bool match = false;
+		for (const wchar_t* k : keys) {
+			match = match || std::wcsstr(file, k) != nullptr;
+		}
+		bool known = false;
+		for (int j = 0; j < seenCount; ++j) {
+			known = known || seen[j] == modules[i];
+		}
+		if (match && !known && seenCount < 256) {
+			seen[seenCount++] = modules[i];
+			plog::Info("module loaded: %ls", path);
+		}
+	}
+}
+
 auto WINAPI Worker(LPVOID) -> DWORD {
 	bool logged = false;
 	const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 	int untilMute = 0;
+	int untilScan = 0;
 	while (WaitForSingleObject(g_stop, PollMs) == WAIT_TIMEOUT) {
+		pad::Poll();
+		if (--untilScan <= 0) {
+			untilScan = RescanPolls;
+			WatchModules();
+			if (pad::Connected() && g_exeBase != 0) {
+				SwapImports(g_exeBase, g_folder);  // the game may take an XInput pointer after the first swap
+			}
+		}
 		if (com && --untilMute <= 0) {
 			untilMute = MutePolls;
 			const int muted = MuteSessions();
@@ -411,6 +515,9 @@ auto StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* comman
 	std::snprintf(line, sizeof(line), "%s %s | %s | %d import entries | window %s | active %d | %d commands | %d sessions muted", PluginName, PluginVersion,
 	              g_block != nullptr ? "on" : "off (no d2r-testharness.txt)", g_patchedEntries, g_window.load() != nullptr ? "found" : "none",
 	              Active() ? 1 : 0, g_commands, g_mutedSessions);
+	command->plugin->WriteConsoleMessage(line);
+	plog::Info("%s", line);
+	pad::Describe(line, sizeof(line));
 	command->plugin->WriteConsoleMessage(line);
 	plog::Info("%s", line);
 	plog::Info("calls: cursor %u, physical %u, key %u, async key %u, foreground %u, active %u, focus %u", g_calls[0].load(), g_calls[1].load(), g_calls[2].load(),
@@ -465,7 +572,12 @@ auto Start(const D2RL::PluginContext* context, char* report, size_t size) noexce
 	if (core != nullptr) {
 		g_execute = reinterpret_cast<ExecuteConsoleCommandFn>(GetProcAddress(core, MAKEINTRESOURCEA(D2RL::CoreExports::ExecuteConsoleCommandInfo.ordinal)));
 	}
-	SwapImports(context->exeBase);
+	pad::Init(folder);
+	pad::Poll();
+	g_exeBase = context->exeBase;
+	std::swprintf(g_folder, MAX_PATH, L"%ls", folder);
+	SwapImports(context->exeBase, folder);
+	WatchModules();
 	g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	g_worker = g_stop != nullptr ? CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr) : nullptr;
 	std::snprintf(report, size, "on: block ready, %d import entries swapped, console %s, worker %s", g_patchCount, g_execute != nullptr ? "yes" : "no",
