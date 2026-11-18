@@ -125,9 +125,13 @@ decltype(&GetForegroundWindow) g_realForeground = nullptr;
 decltype(&GetActiveWindow) g_realActive = nullptr;
 decltype(&GetFocus) g_realFocus = nullptr;
 
+// The device used last wins, as for a player: a pad change after the last harness mouse input hands the cursor back to the real
+// one, otherwise the pinned virtual point keeps D2R in mouse UI and pad focus never moves.
+std::atomic<ULONGLONG> g_mouseTick{0};
+
 auto VirtualCursor(LPPOINT point) noexcept -> bool {
 	const HWND window = g_window.load();
-	if (point == nullptr || window == nullptr || !Active()) {
+	if (point == nullptr || window == nullptr || !Active() || (pad::Connected() && pad::ChangedTick() > g_mouseTick.load())) {
 		return false;
 	}
 	POINT p {g_block[IdxX], g_block[IdxY]};
@@ -470,8 +474,14 @@ auto WINAPI Worker(LPVOID) -> DWORD {
 	const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 	int untilMute = 0;
 	int untilScan = 0;
+	int32_t lastMouse[3] = {};
 	while (WaitForSingleObject(g_stop, PollMs) == WAIT_TIMEOUT) {
 		pad::Poll();
+		const int32_t mouse[3] = {g_block[IdxX], g_block[IdxY], g_block[IdxButtons]};
+		if (std::memcmp(mouse, lastMouse, sizeof(mouse)) != 0) {
+			std::memcpy(lastMouse, mouse, sizeof(mouse));
+			g_mouseTick.store(GetTickCount64());
+		}
 		if (--untilScan <= 0) {
 			untilScan = RescanPolls;
 			WatchModules();
