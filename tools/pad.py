@@ -131,6 +131,7 @@ def plan(argv: list[str], state: State) -> list[tuple[State, float]]:
             raise PadError("release <button|all>")
         if args[0].lower() == "all":
             s.buttons = s.lt = s.rt = 0
+            s.lx = s.ly = s.rx = s.ry = 0
         else:
             set_button(s, args[0], False)
         return [(s, 0.0)]

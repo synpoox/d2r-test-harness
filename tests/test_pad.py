@@ -22,6 +22,9 @@ class PlanTests(unittest.TestCase):
         s = pad.plan(["hold", "RT"], pad.plan(["hold", "lb"], pad.State())[0][0])[0][0]
         self.assertEqual((s.buttons, s.rt), (0x0100, 255))
         self.assertEqual(pad.plan(["release", "all"], s)[0][0].buttons, 0)
+        stuck = pad.State(lx=32767, ry=-5)
+        freed = pad.plan(["release", "all"], stuck)[0][0]
+        self.assertEqual((freed.lx, freed.ly, freed.rx, freed.ry), (0, 0, 0, 0))
 
     def test_keys_survive_pad_commands(self):
         s = pad.plan(["key", "hold", "ctrl"], pad.State())[0][0]

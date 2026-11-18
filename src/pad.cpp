@@ -28,11 +28,7 @@ std::atomic<bool> g_connected{false};
 std::atomic<DWORD> g_packet{0};
 std::atomic<uint32_t> g_calls[5] = {};  // GetState, GetStateEx, GetCapabilities, SetState, GetKeystroke
 
-void* g_realGetState = nullptr;
-void* g_realGetStateEx = nullptr;
-void* g_realCaps = nullptr;
-void* g_realSetState = nullptr;
-void* g_realKeystroke = nullptr;
+void* g_real[Modules][5] = {};  // per module: GetState, GetStateEx, GetCapabilities, SetState, GetKeystroke
 
 auto Fill(XState* out) noexcept -> DWORD {
 	out->buttons = g_state.buttons;
@@ -46,26 +42,29 @@ auto Fill(XState* out) noexcept -> DWORD {
 	return ERROR_SUCCESS;
 }
 
+template <int M>
 auto WINAPI HookGetState(DWORD index, XState* out) -> DWORD {
 	g_calls[0].fetch_add(1, std::memory_order_relaxed);
 	if (!g_connected.load()) {
-		return g_realGetState != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, XState*)>(g_realGetState)(index, out) : NotConnected;
+		return g_real[M][0] != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, XState*)>(g_real[M][0])(index, out) : NotConnected;
 	}
 	return index == 0 && out != nullptr ? Fill(out) : NotConnected;
 }
 
+template <int M>
 auto WINAPI HookGetStateEx(DWORD index, XState* out) -> DWORD {
 	g_calls[1].fetch_add(1, std::memory_order_relaxed);
 	if (!g_connected.load()) {
-		return g_realGetStateEx != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, XState*)>(g_realGetStateEx)(index, out) : NotConnected;
+		return g_real[M][1] != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, XState*)>(g_real[M][1])(index, out) : NotConnected;
 	}
 	return index == 0 && out != nullptr ? Fill(out) : NotConnected;
 }
 
+template <int M>
 auto WINAPI HookCaps(DWORD index, DWORD flags, uint8_t* caps) -> DWORD {  // XINPUT_CAPABILITIES, 20 bytes
 	g_calls[2].fetch_add(1, std::memory_order_relaxed);
 	if (!g_connected.load()) {
-		return g_realCaps != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, DWORD, uint8_t*)>(g_realCaps)(index, flags, caps) : NotConnected;
+		return g_real[M][2] != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, DWORD, uint8_t*)>(g_real[M][2])(index, flags, caps) : NotConnected;
 	}
 	if (index != 0 || caps == nullptr) {
 		return NotConnected;
@@ -85,29 +84,34 @@ auto WINAPI HookCaps(DWORD index, DWORD flags, uint8_t* caps) -> DWORD {  // XIN
 	return ERROR_SUCCESS;
 }
 
+template <int M>
 auto WINAPI HookSetState(DWORD index, void* vibration) -> DWORD {
 	g_calls[3].fetch_add(1, std::memory_order_relaxed);
 	if (!g_connected.load()) {
-		return g_realSetState != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, void*)>(g_realSetState)(index, vibration) : NotConnected;
+		return g_real[M][3] != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, void*)>(g_real[M][3])(index, vibration) : NotConnected;
 	}
 	return index == 0 ? ERROR_SUCCESS : NotConnected;  // rumble is dropped
 }
 
+template <int M>
 auto WINAPI HookKeystroke(DWORD index, DWORD reserved, void* keystroke) -> DWORD {
 	g_calls[4].fetch_add(1, std::memory_order_relaxed);
 	if (!g_connected.load()) {
-		return g_realKeystroke != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, DWORD, void*)>(g_realKeystroke)(index, reserved, keystroke) : NotConnected;
+		return g_real[M][4] != nullptr ? reinterpret_cast<DWORD(WINAPI*)(DWORD, DWORD, void*)>(g_real[M][4])(index, reserved, keystroke) : NotConnected;
 	}
 	return Empty;
 }
 
-Export g_exports[] = {
-	{"XInputGetState", reinterpret_cast<void*>(&HookGetState), &g_realGetState},
-	{"#100", reinterpret_cast<void*>(&HookGetStateEx), &g_realGetStateEx},
-	{"XInputGetCapabilities", reinterpret_cast<void*>(&HookCaps), &g_realCaps},
-	{"XInputSetState", reinterpret_cast<void*>(&HookSetState), &g_realSetState},
-	{"XInputGetKeystroke", reinterpret_cast<void*>(&HookKeystroke), &g_realKeystroke},
-};
+template <int M>
+void MakeExports(Export (&e)[5]) noexcept {
+	e[0] = {"XInputGetState", reinterpret_cast<void*>(&HookGetState<M>), &g_real[M][0]};
+	e[1] = {"#100", reinterpret_cast<void*>(&HookGetStateEx<M>), &g_real[M][1]};
+	e[2] = {"XInputGetCapabilities", reinterpret_cast<void*>(&HookCaps<M>), &g_real[M][2]};
+	e[3] = {"XInputSetState", reinterpret_cast<void*>(&HookSetState<M>), &g_real[M][3]};
+	e[4] = {"XInputGetKeystroke", reinterpret_cast<void*>(&HookKeystroke<M>), &g_real[M][4]};
+}
+
+Export g_exports[Modules][5];
 
 // Value of "key=<number>" as a whole word in the text.
 auto Number(const char* text, const char* key, long* out) noexcept -> bool {
@@ -161,6 +165,7 @@ auto Parse(const char* text, State* out) noexcept -> bool {
 
 void Init(const wchar_t* folder) noexcept {
 	std::swprintf(g_path, MAX_PATH, L"%ls\\%hs", folder, FileName);
+	DeleteFileW(g_path);  // a leftover file from an earlier run would boot the game into controller UI with stale keys
 }
 
 void Poll() noexcept {
@@ -201,9 +206,17 @@ auto Connected() noexcept -> bool {
 	return g_connected.load();
 }
 
-auto Exports(size_t* count) noexcept -> Export* {
-	*count = sizeof(g_exports) / sizeof(g_exports[0]);
-	return g_exports;
+auto Exports(int module, size_t* count) noexcept -> Export* {
+	if (g_exports[0][0].hook == nullptr) {
+		MakeExports<0>(g_exports[0]);
+		MakeExports<1>(g_exports[1]);
+		MakeExports<2>(g_exports[2]);
+		MakeExports<3>(g_exports[3]);
+		MakeExports<4>(g_exports[4]);
+		MakeExports<5>(g_exports[5]);
+	}
+	*count = 5;
+	return g_exports[module];
 }
 
 auto KeyHeld(int vk, SHORT* state) noexcept -> bool {

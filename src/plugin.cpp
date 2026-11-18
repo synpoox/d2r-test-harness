@@ -204,7 +204,7 @@ void SwapSlot(void** slot, void* hook) noexcept {
 		return;
 	}
 	DWORD old = 0;
-	if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+	if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {  // keeps the page executable, as the old protection may be
 		return;
 	}
 	g_patches[g_patchCount++] = Patch {slot, *slot};
@@ -273,10 +273,11 @@ void SwapEverywhere(uintptr_t exeBase, const wchar_t* folder, Swap* swaps, int c
 // Resolved by export name, never by address. Returns the new number of entries in swaps.
 auto AddPadSwaps(Swap* swaps, int at, int capacity) noexcept -> int {
 	static const wchar_t* const modules[] = {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinputuap.dll", L"xinput1_2.dll", L"xinput1_1.dll"};
-	size_t exportCount = 0;
-	pad::Export* exports = pad::Exports(&exportCount);
-	for (const wchar_t* name : modules) {
-		const HMODULE module = GetModuleHandleW(name);
+	static_assert(sizeof(modules) / sizeof(modules[0]) == pad::Modules);
+	for (int m = 0; m < pad::Modules; ++m) {
+		size_t exportCount = 0;
+		pad::Export* exports = pad::Exports(m, &exportCount);
+		const HMODULE module = GetModuleHandleW(modules[m]);
 		if (module == nullptr) {
 			continue;
 		}
@@ -284,9 +285,7 @@ auto AddPadSwaps(Swap* swaps, int at, int capacity) noexcept -> int {
 			const char* exportName = exports[i].name;
 			void* const real = reinterpret_cast<void*>(exportName[0] == '#' ? GetProcAddress(module, MAKEINTRESOURCEA(std::atoi(exportName + 1))) : GetProcAddress(module, exportName));
 			if (real != nullptr && at < capacity) {
-				if (*exports[i].real == nullptr) {
-					*exports[i].real = real;
-				}
+				*exports[i].real = real;
 				swaps[at++] = Swap {exportName, real, exports[i].hook};
 			}
 		}
@@ -318,7 +317,11 @@ void SwapImports(uintptr_t exeBase, const wchar_t* folder) noexcept {
 		{"GetFocus", reinterpret_cast<void*>(g_realFocus), reinterpret_cast<void*>(&HookFocus)},
 		{"TrackMouseEvent", reinterpret_cast<void*>(GetProcAddress(user32, "TrackMouseEvent")), reinterpret_cast<void*>(&HookTrackMouse)},
 	};
-	const int count = AddPadSwaps(swaps, 8, 64);
+	int initialised = 0;
+	while (swaps[initialised].name != nullptr) {
+		++initialised;
+	}
+	const int count = AddPadSwaps(swaps, initialised, 64);
 	SwapEverywhere(exeBase, folder, swaps, count);
 	g_patchedEntries = g_patchCount;
 }
@@ -326,7 +329,7 @@ void SwapImports(uintptr_t exeBase, const wchar_t* folder) noexcept {
 void RestoreImports() noexcept {
 	for (int i = g_patchCount - 1; i >= 0; --i) {
 		DWORD old = 0;
-		if (VirtualProtect(g_patches[i].slot, sizeof(void*), PAGE_READWRITE, &old)) {
+		if (VirtualProtect(g_patches[i].slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
 			*g_patches[i].slot = g_patches[i].original;
 			VirtualProtect(g_patches[i].slot, sizeof(void*), old, &old);
 		}
@@ -590,7 +593,7 @@ void Stop() noexcept {
 		SetEvent(g_stop);
 	}
 	if (g_worker != nullptr) {
-		WaitForSingleObject(g_worker, 1000);
+		WaitForSingleObject(g_worker, INFINITE);  // RestoreImports must not race a scan
 		CloseHandle(g_worker);
 		g_worker = nullptr;
 	}

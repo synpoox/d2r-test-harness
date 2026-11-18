@@ -27,8 +27,9 @@ export, `XInputGetStateEx` (ordinal 100), `XInputGetCapabilities`, `XInputSetSta
 same import-table scan it uses for the cursor. Exports are found by name in every loaded XInput DLL, never by address.
 Held keys answer `GetAsyncKeyState` and `GetKeyState`, which is how core-ui reads Ctrl.
 
-It stays off with the rest of the harness (no `d2r-testharness.txt`), and within a harness run the pad is only
-"connected" while `d2r-testharness-pad.txt` exists next to the DLL. With no pad file the real XInput answers.
+The pad needs `d2r-testharness.txt` (game_ctl writes it at every start); the plugin then polls the pad file every 20 ms.
+The pad is connected exactly while `d2r-testharness-pad.txt` exists next to the DLL, and the plugin deletes a leftover
+pad file when it loads, so a new run never starts with a stale pad or held keys. With no pad file the real XInput answers.
 
 ```powershell
 $env:MODKIT_TESTING_CONFIG = "C:\path\to\modkit-testing.toml"      # --slot N reads game.slots_dir from it
@@ -45,7 +46,8 @@ XInput function; the plugin log lists input-related modules as they load. Tests:
 
 Limits: a mouse move or click makes the game fall back to the mouse UI (send pad input after it, and `release` the
 mouse); held keys answer only the key-state queries, not `WM_KEYDOWN`, so they suit modifiers; rumble is dropped; only
-pad 0 exists. The caller must hold the slot lock, as for every other harness command (`pad.py` does not check it).
+pad 0 exists; `GetAsyncKeyState`'s low bit (pressed since the last call) is never set, and a press shorter than ~20 ms
+can be missed. The caller must hold the slot lock, as for every other harness command (`pad.py` does not check it).
 
 ## Build
 

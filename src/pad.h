@@ -21,7 +21,8 @@ struct Export {
 void Init(const wchar_t* pluginFolder) noexcept;
 void Poll() noexcept;  // re-reads the file when its text changed
 auto Connected() noexcept -> bool;
-auto Exports(size_t* count) noexcept -> Export*;
+constexpr int Modules = 6;  // xinput1_4, 1_3, 9_1_0, uap, 1_2, 1_1: each has its own hooks, so each forwards to its own real function
+auto Exports(int module, size_t* count) noexcept -> Export*;
 auto KeyHeld(int vk, SHORT* state) noexcept -> bool;  // true when a held key answers for vk
 void Describe(char* out, size_t size) noexcept;
 
