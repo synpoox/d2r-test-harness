@@ -16,6 +16,7 @@ add_subdirectory(${D2RL_SDK_DIR} PluginSDK EXCLUDE_FROM_ALL)
 
 add_library(test_harness SHARED
 	src/plugin.cpp
+	src/pad.cpp
 	src/log.cpp
 	src/test-harness.rc
 )
