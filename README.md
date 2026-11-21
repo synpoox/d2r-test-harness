@@ -24,7 +24,7 @@ Console command `testharness` prints the state.
 A scripted controller and held keys, with no driver (no ViGEmBus) and no admin. D2R 93847 polls `XInputGetState` about
 100 times a second (it loads `XINPUT9_1_0.dll` at start, `XInput1_4.dll` a few seconds later), so the plugin swaps that
 export, `XInputGetStateEx` (ordinal 100), `XInputGetCapabilities`, `XInputSetState` and `XInputGetKeystroke` in the
-same import-table scan it uses for the cursor. Exports are found by name in every loaded XInput DLL, never by address.
+same import-table scan it uses for the cursor. The scan covers every DLL under the game folder, plugins included. Exports are found by name in every loaded XInput DLL, never by address.
 Held keys answer `GetAsyncKeyState` and `GetKeyState`, which is how core-ui reads Ctrl.
 
 The pad needs `d2r-testharness.txt` (game_ctl writes it at every start); the plugin then polls the pad file every 20 ms.

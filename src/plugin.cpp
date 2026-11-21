@@ -84,7 +84,6 @@ int g_patchedEntries = 0;
 int g_commands = 0;
 int g_mutedSessions = 0;
 uintptr_t g_exeBase = 0;
-wchar_t g_folder[MAX_PATH] = L"";
 
 struct Patch {
 	void** slot;
@@ -205,6 +204,11 @@ auto Readable(DWORD protect) noexcept -> bool {
 
 void SwapSlot(void** slot, void* hook) noexcept {
 	if (g_patchCount >= MaxPatches) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			plog::Info("import patch cap %d reached, further entries are not swapped", MaxPatches);
+		}
 		return;
 	}
 	DWORD old = 0;
@@ -252,7 +256,7 @@ void SwapInModule(uintptr_t base, Swap* swaps, int count) noexcept {
 // Swaps the entries in the game image, D2RCore.dll and every other DLL under the game folder (a plugin then reads the
 // same virtual input as the game). Plugins load from the game's d2rloader/plugins and from each mod's own plugins folder,
 // so the harness's own folder is not enough. The rescan catches later loads.
-void SwapEverywhere(uintptr_t exeBase, const wchar_t*, Swap* swaps, int count) noexcept {
+void SwapEverywhere(uintptr_t exeBase, Swap* swaps, int count) noexcept {
 	wchar_t root[MAX_PATH] = L"";
 	if (GetModuleFileNameW(nullptr, root, MAX_PATH) != 0) {
 		if (wchar_t* slash = std::wcsrchr(root, L'\\')) {
@@ -277,7 +281,7 @@ void SwapEverywhere(uintptr_t exeBase, const wchar_t*, Swap* swaps, int count) n
 				const int before = g_patchCount;
 				SwapInModule(reinterpret_cast<uintptr_t>(modules[i]), swaps, count);
 				if (g_patchCount != before) {
-					plog::Info("swapped %d import entries in %ls", g_patchCount - before, path);
+					plog::Info("swapped %d import entries in %ls (%d of %d patches)", g_patchCount - before, path, g_patchCount, MaxPatches);
 				}
 			}
 		}
@@ -308,8 +312,7 @@ auto AddPadSwaps(Swap* swaps, int at, int capacity) noexcept -> int {
 	return at;
 }
 
-// folder: the plugins folder.
-void SwapImports(uintptr_t exeBase, const wchar_t* folder) noexcept {
+void SwapImports(uintptr_t exeBase) noexcept {
 	const HMODULE user32 = GetModuleHandleW(L"user32.dll");
 	if (user32 == nullptr) {
 		return;
@@ -337,7 +340,7 @@ void SwapImports(uintptr_t exeBase, const wchar_t* folder) noexcept {
 		++initialised;
 	}
 	const int count = AddPadSwaps(swaps, initialised, 64);
-	SwapEverywhere(exeBase, folder, swaps, count);
+	SwapEverywhere(exeBase, swaps, count);
 	g_patchedEntries = g_patchCount;
 }
 
@@ -497,7 +500,7 @@ auto WINAPI Worker(LPVOID) -> DWORD {
 			untilScan = RescanPolls;
 			WatchModules();
 			if (pad::Connected() && g_exeBase != 0) {
-				SwapImports(g_exeBase, g_folder);  // the game may take an XInput pointer after the first swap
+				SwapImports(g_exeBase);  // the game may take an XInput pointer after the first swap
 			}
 		}
 		if (com && --untilMute <= 0) {
@@ -599,8 +602,7 @@ auto Start(const D2RL::PluginContext* context, char* report, size_t size) noexce
 	pad::Init(folder);
 	pad::Poll();
 	g_exeBase = context->exeBase;
-	std::swprintf(g_folder, MAX_PATH, L"%ls", folder);
-	SwapImports(context->exeBase, folder);
+	SwapImports(context->exeBase);
 	WatchModules();
 	g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	g_worker = g_stop != nullptr ? CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr) : nullptr;
